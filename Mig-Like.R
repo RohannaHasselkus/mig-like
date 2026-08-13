@@ -1,6 +1,3 @@
-
-# PACKAGES
-
 library(expm)
 
 
@@ -18,130 +15,219 @@ create_tree <- function(edges, times, leaf_states, root) {
 
 # MIGRATION MODEL
 
-make_migration <- function(K, Q) {
-  list(K = K, Q = Q)
+make_migration <- function(K, Q, N, pi) {
+  list(
+    K = K,
+    Q = Q,
+    N = N,
+    pi = pi
+  )
 }
 
 
-# BACKWARD PASS (TREE LIKELIHOOD)
+# PROPAGATE LIKELIHOOD UP A BRANCH
+
+propagate_branch <- function(L_child, delta, Q) {
+  
+  T <- expm(Q * delta)
+  
+  as.numeric(T %*% L_child)
+  
+}
+
+
+# BACKWARD PASS
 
 backward_pass <- function(tree, mig) {
   
   K <- mig$K
-  edges <- tree$edges
+  Q <- mig$Q
+  N <- mig$N
   
-  children <- split(edges[,2], edges[,1])
-  nodes <- unique(as.vector(edges))
-  internal <- setdiff(nodes, names(tree$leaf_states))
+  children <- split(tree$edges[,2], tree$edges[,1])
   
   L <- list()
   
-  # leaves
-  for (leaf in names(tree$leaf_states)) {
-    v <- rep(0, K)
-    v[tree$leaf_states[[leaf]]] <- 1
-    L[[leaf]] <- as.numeric(v)
-  }
   
-  # internal nodes
-  for (a in internal) {
+  # recursive postorder traversal
+  
+  recurse <- function(node) {
     
-    kids <- children[[a]]
-    left <- L[[kids[1]]]
-    right <- L[[kids[2]]]
     
-    La <- numeric(K)
+    # leaf
     
-    for (k in 1:K) {
-      La[k] <- (left[k] * right[k]) / (2 * 1000)
+    if (node %in% names(tree$leaf_states)) {
+      
+      v <- rep(0, K)
+      
+      v[tree$leaf_states[[node]]] <- 1
+      
+      L[[node]] <<- v
+      
+      return(v)
     }
     
-    L[[a]] <- as.numeric(La)
+    
+    # internal node
+    
+    kids <- children[[node]]
+    
+    
+    left_child <- recurse(kids[1])
+    right_child <- recurse(kids[2])
+    
+    
+    left <- propagate_branch(
+      left_child,
+      abs(tree$times[node] - tree$times[kids[1]]),
+      Q
+    )
+    
+    right <- propagate_branch(
+      right_child,
+      abs(tree$times[node] - tree$times[kids[2]]),
+      Q
+    )
+    
+    
+    node_L <- numeric(K)
+    
+    
+    for (k in 1:K) {
+      
+      node_L[k] <-
+        (left[k] * right[k]) /
+        (2 * N[k])
+      
+    }
+    
+    
+    L[[node]] <<- node_L
+    
+    
+    node_L
+    
   }
+  
+  
+  recurse(tree$root)
   
   L
 }
 
 
-# FORWARD PASS (TIME-DEPENDENT MIGRATION)
+
+# FORWARD PASS (CURRENT PLACEHOLDER)
+# This remains the original migration propagation.
+# It will need redesign later for lineage/pair states.
 
 forward_pass <- function(tree, mig, time_grid) {
   
   Q <- mig$Q
   K <- nrow(Q)
   
+  pi_current <- mig$pi
+  
   pi_t <- list()
   
-  pi_current <- rep(1 / K, K)
-  pi_t[[1]] <- as.numeric(pi_current)
+  pi_t[[1]] <- pi_current
+  
   
   dt <- diff(time_grid)
   
+  
   for (t in 2:length(time_grid)) {
     
-    T <- expm(Q * dt[t - 1])
-    pi_current <- as.numeric(pi_current %*% T)
+    Tmat <- expm(Q * dt[t-1])
     
-    pi_t[[t]] <- as.numeric(pi_current)
+    pi_current <- as.numeric(pi_current %*% Tmat)
+    
+    pi_t[[t]] <- pi_current
+    
   }
   
+  
   pi_t
+  
 }
 
 
-# COALESCENT RATE λ(t)
+
+# CURRENT LAMBDA PLACEHOLDER
 
 compute_lambda_t <- function(tree, pi_t, mig, time_grid) {
   
-  edges <- tree$edges
   
   lambda_t <- numeric(length(time_grid))
   
-  for (t_idx in seq_along(time_grid)) {
+  
+  for (i in seq_along(time_grid)) {
     
-    lambda <- 0
+    lambda_t[i] <- 0
     
-    pi_vec <- as.numeric(pi_t[[t_idx]])
-    
-    for (i in 1:nrow(edges)) {
-      
-      for (k in 1:length(pi_vec)) {
-        lambda <- lambda + pi_vec[k] * pi_vec[k]
-      }
-    }
-    
-    lambda_t[t_idx] <- lambda / (2 * 1000)
   }
   
+  
   lambda_t
+  
 }
+
 
 
 # INTEGRATION
 
 integrate_lambda <- function(lambda_t, time_grid) {
+  
   dt <- diff(time_grid)
+  
   sum(lambda_t[-1] * dt)
+  
 }
+
 
 
 # LIKELIHOOD
 
-compute_likelihood <- function(L, lambda_int, root) {
-  log(sum(as.numeric(L[[root]])) + 1e-12) - lambda_int
+compute_likelihood <- function(L, lambda_int, root, pi) {
+  
+  L_peel <- sum(pi * L[[root]])
+  
+  log(L_peel + 1e-12) - lambda_int
+  
 }
+
 
 
 # FULL PIPELINE
 
 run_glike_continuous <- function(tree, mig, time_grid) {
   
-  L <- backward_pass(tree, mig)
-  pi_t <- forward_pass(tree, mig, time_grid)
-  lambda_t <- compute_lambda_t(tree, pi_t, mig, time_grid)
-  lambda_int <- integrate_lambda(lambda_t, time_grid)
   
-  logL <- compute_likelihood(L, lambda_int, tree$root)
+  L <- backward_pass(tree, mig)
+  
+  pi_t <- forward_pass(tree, mig, time_grid)
+  
+  lambda_t <- compute_lambda_t(
+    tree,
+    pi_t,
+    mig,
+    time_grid
+  )
+  
+  
+  lambda_int <- integrate_lambda(
+    lambda_t,
+    time_grid
+  )
+  
+  
+  logL <- compute_likelihood(
+    L,
+    lambda_int,
+    tree$root,
+    mig$pi
+  )
+  
   
   list(
     log_likelihood = logL,
@@ -150,39 +236,9 @@ run_glike_continuous <- function(tree, mig, time_grid) {
     lambda_t = lambda_t,
     lambda_integral = lambda_int
   )
+  
 }
 
-
-# DIAGNOSTICS
-
-run_diagnostics <- function(tree, mig, time_grid) {
-  
-  mig2 <- mig
-  mig2$Q <- mig$Q * 10
-  
-  pi1 <- forward_pass(tree, mig, time_grid)
-  pi2 <- forward_pass(tree, mig2, time_grid)
-  
-  diff_pi <- 0
-  
-  for (t in seq_along(time_grid)) {
-    diff_pi <- diff_pi + sum(abs(pi1[[t]] - pi2[[t]]))
-  }
-  
-  cat("PI sensitivity:", diff_pi, "\n")
-  
-  L <- backward_pass(tree, mig)
-  pi <- forward_pass(tree, mig, time_grid)
-  
-  lambda <- compute_lambda_t(tree, pi, mig, time_grid)
-  
-  tree_term <- log(sum(L[[tree$root]]) + 1e-12)
-  lambda_term <- integrate_lambda(lambda, time_grid)
-  
-  cat("Tree term:", tree_term, "\n")
-  cat("Lambda term:", lambda_term, "\n")
-  cat("Ratio:", abs(tree_term / (lambda_term + 1e-12)), "\n")
-}
 
 
 # TOY EXAMPLE
@@ -190,30 +246,75 @@ run_diagnostics <- function(tree, mig, time_grid) {
 
 K <- 2
 
-Q <- matrix(c(
-  -0.2, 0.2,
-  0.2, -0.2
-), 2, 2, byrow = TRUE)
 
-mig <- make_migration(K, Q)
+Q <- matrix(
+  c(
+    -0.2, 0.2,
+    0.2,-0.2
+  ),
+  2,
+  2,
+  byrow = TRUE
+)
 
-edges <- matrix(c(
-  "root", "a",
-  "root", "b"
-), byrow = TRUE, ncol = 2)
 
-times <- c(root = 2, a = 0, b = 0)
+mig <- make_migration(
+  K = K,
+  Q = Q,
+  N = c(1000,1000),
+  pi = c(0.5,0.5)
+)
 
-leaf_states <- list(a = 1, b = 2)
 
-tree <- create_tree(edges, times, leaf_states, "root")
 
-time_grid <- seq(0, 2, length.out = 50)
+edges <- matrix(
+  c(
+    "root","a",
+    "root","b"
+  ),
+  ncol = 2,
+  byrow = TRUE
+)
 
-# RUN MODEL
-res <- run_glike_continuous(tree, mig, time_grid)
+
+times <- c(
+  root = 2,
+  a = 0,
+  b = 0
+)
+
+
+leaf_states <- list(
+  a = 1,
+  b = 2
+)
+
+
+tree <- create_tree(
+  edges,
+  times,
+  leaf_states,
+  "root"
+)
+
+
+time_grid <- seq(
+  0,
+  2,
+  length.out = 50
+)
+
+
+
+# RUN
+
+res <- run_glike_continuous(
+  tree,
+  mig,
+  time_grid
+)
+
+
+res$L[["root"]]
 
 res$log_likelihood
-
-# RUN DIAGNOSTICS
-run_diagnostics(tree, mig, time_grid)
